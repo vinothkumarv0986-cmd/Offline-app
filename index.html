@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>OfflineConnect</title>
+<style>
+*{box-sizing:border-box;margin:0;-webkit-tap-highlight-color:transparent}
+body{font-family:system-ui,sans-serif;background:#0b0b0f;color:#fff;min-height:100vh;padding-bottom:64px}
+header{position:sticky;top:0;background:#0b0b0fee;backdrop-filter:blur(8px);padding:12px 16px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #222;z-index:5}
+h1{font-size:20px;background:linear-gradient(45deg,#feda75,#d62976,#4f5bd5);-webkit-background-clip:text;color:transparent}
+#me{font-size:13px;color:#aaa}
+nav{position:fixed;bottom:0;left:0;right:0;display:flex;background:#111;border-top:1px solid #222;z-index:5}
+nav button{flex:1;padding:16px;background:none;border:0;color:#888;font-size:15px}
+nav button.on{color:#fff;font-weight:600}
+.view{display:none;max-width:480px;margin:0 auto}.view.on{display:block}
+.post{border-bottom:1px solid #222;padding-bottom:10px}
+.post .u{padding:10px 14px;font-weight:600;font-size:14px}
+.post .img{position:relative}
+.post img{width:100%;display:block}
+.heart{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:90px;opacity:0;pointer-events:none;transition:.3s}
+.heart.pop{opacity:1;transform:scale(1.2)}
+.bar{padding:8px 14px;display:flex;gap:16px;font-size:26px}
+.bar span{cursor:pointer}.liked{color:#ff3b5c}
+.meta{padding:0 14px;font-size:14px;line-height:1.4}
+.cm{color:#ccc}
+.cin{display:flex;gap:8px;padding:6px 14px}
+.cin input{flex:1;background:#1a1a22;border:0;color:#fff;padding:8px 10px;border-radius:8px}
+.cin button{background:none;border:0;color:#4f9dff}
+.btn{background:#4f5bd5;color:#fff;border:0;border-radius:10px;padding:10px 16px;font-size:15px}
+.btn.red{background:#e0245e}.btn.green{background:#1fa95b}
+.card{padding:16px}
+.peer{display:flex;justify-content:space-between;align-items:center;padding:12px 0;border-bottom:1px solid #222}
+#login{position:fixed;inset:0;background:#0b0b0f;z-index:20;display:flex;flex-direction:column;gap:14px;align-items:center;justify-content:center;padding:24px;text-align:center}
+#login input{padding:12px;border-radius:10px;border:0;width:100%;max-width:280px;font-size:16px}
+#call{position:fixed;inset:0;background:#000;z-index:15;display:none}
+#remote{width:100%;height:100%;object-fit:cover}
+#local{position:absolute;right:12px;top:12px;width:100px;height:140px;object-fit:cover;border-radius:12px;border:2px solid #fff3;background:#222}
+#ctl{position:absolute;bottom:30px;left:0;right:0;display:flex;justify-content:center;gap:16px}
+#incoming{position:fixed;left:12px;right:12px;top:12px;background:#222;border-radius:14px;padding:14px;z-index:30;display:none;align-items:center;justify-content:space-between;gap:10px}
+.small{color:#888;font-size:12px;padding:8px 16px}
+</style>
+</head>
+<body>
+<div id="login">
+  <h1 style="font-size:32px">OfflineConnect</h1>
+  <p style="color:#aaa">Feed, likes &amp; video calls over local Wi-Fi.<br>No internet needed.</p>
+  <input id="name" placeholder="Pick a username" maxlength="20" autocapitalize="off">
+  <button class="btn" onclick="join()">Join</button>
+  <p id="err" style="color:#ff6b6b"></p>
+</div>
+
+<header><h1>OfflineConnect</h1><span id="me"></span></header>
+
+<div id="v-feed" class="view on">
+  <div class="card"><label class="btn" style="display:inline-block">+ New post
+    <input id="file" type="file" accept="image/*" hidden onchange="newPost(this)"></label></div>
+  <div id="feed"></div>
+</div>
+
+<div id="v-call" class="view">
+  <div class="card"><b>Online now</b><div id="peers"></div>
+  <p class="small">Everyone must be on the same Wi-Fi or hotspot.</p></div>
+</div>
+
+<nav><button id="n-feed" class="on" onclick="tab('feed')">Feed</button><button id="n-call" onclick="tab('call')">Call</button></nav>
+
+<div id="incoming"><span id="inTxt"></span><span><button class="btn green" onclick="accept()">Accept</button> <button class="btn red" onclick="decline()">No</button></span></div>
+
+<div id="call">
+  <video id="remote" autoplay playsinline></video>
+  <video id="local" autoplay playsinline muted></video>
+  <div id="ctl">
+    <button class="btn" onclick="toggle('audio',this)">Mute</button>
+    <button class="btn" onclick="toggle('video',this)">Cam off</button>
+    <button class="btn red" onclick="hangup(true)">End</button>
+  </div>
+</div>
+
+<script>
+let me, es, pc, stream, other, pendingOffer, queue = [];
+const $ = id => document.getElementById(id);
+const esc = s => s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const post = (u, d) => fetch(u, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(d) });
+
+function tab(t) {
+  ['feed', 'call'].forEach(x => { $('v-' + x).classList.toggle('on', x === t); $('n-' + x).classList.toggle('on', x === t); });
+}
+
+function join() {
+  const n = $('name').value.trim();
+  if (!n) return;
+  es = new EventSource('/events?name=' + encodeURIComponent(n));
+  es.onopen = () => { me = n; localStorage.oc_name = n; $('me').textContent = '@' + n; $('login').style.display = 'none'; };
+  es.onerror = () => { if (!me) { $('err').textContent = 'Name taken or server unreachable.'; es.close(); } };
+  es.addEventListener('feed', e => renderFeed(JSON.parse(e.data)));
+  es.addEventListener('peers', e => renderPeers(JSON.parse(e.data)));
+  es.addEventListener('signal', e => onSignal(JSON.parse(e.data)));
+}
+if (localStorage.oc_name) $('name').value = localStorage.oc_name;
+
+// ---------- feed ----------
+let lastFeed = [];
+function renderFeed(list) {
+  lastFeed = list;
+  if (document.activeElement && document.activeElement.classList.contains('cinput')) return; // don't wipe a comment being typed
+  $('feed').innerHTML = list.map(p => `
+    <div class="post" id="p-${p.id}">
+      <div class="u">@${esc(p.user)}</div>
+      <div class="img" ondblclick="like('${p.id}',true)"><img src="${p.image}"><div class="heart" id="h-${p.id}">❤️</div></div>
+      <div class="bar"><span class="${p.likes.includes(me) ? 'liked' : ''}" onclick="like('${p.id}')">${p.likes.includes(me) ? '♥' : '♡'}</span></div>
+      <div class="meta"><b>${p.likes.length} likes</b><br><b>@${esc(p.user)}</b> ${esc(p.caption)}
+        ${p.comments.map(c => `<div class="cm"><b>@${esc(c.user)}</b> ${esc(c.text)}</div>`).join('')}</div>
+      <div class="cin"><input class="cinput" id="c-${p.id}" placeholder="Add a comment…"><button onclick="comment('${p.id}')">Post</button></div>
+    </div>`).join('') || '<p class="small">No posts yet. Be the first!</p>';
+}
+function like(id, dbl) {
+  const p = lastFeed.find(x => x.id === id);
+  if (dbl) { const h = $('h-' + id); h.classList.add('pop'); setTimeout(() => h.classList.remove('pop'), 600); if (p && p.likes.includes(me)) return; }
+  post('/like', { id, user: me });
+}
+function comment(id) {
+  const i = $('c-' + id); if (!i.value.trim()) return;
+  post('/comment', { id, user: me, text: i.value.trim() }); i.value = ''; i.blur();
+}
+function newPost(inp) {
+  const f = inp.files[0]; if (!f) return;
+  const img = new Image();
+  img.onload = () => {
+    const s = Math.min(1, 900 / Math.max(img.width, img.height));
+    const c = document.createElement('canvas'); c.width = img.width * s; c.height = img.height * s;
+    c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+    const caption = prompt('Caption?') || '';
+    post('/post', { user: me, image: c.toDataURL('image/jpeg', 0.75), caption });
+    inp.value = '';
+  };
+  img.src = URL.createObjectURL(f);
+}
+
+// ---------- calls (WebRTC, no STUN/TURN: LAN only) ----------
+function renderPeers(list) {
+  const others = list.filter(n => n !== me);
+  $('peers').innerHTML = others.map(n => `<div class="peer"><span>@${esc(n)}</span><button class="btn green" onclick="callUser('${n}')">Video call</button></div>`).join('') || '<p class="small" style="padding:12px 0">Nobody else is online.</p>';
+}
+const sig = (to, data) => post('/signal', { to, from: me, data });
+
+async function media() {
+  if (!navigator.mediaDevices) { alert('Camera needs HTTPS. Open the https:// link and accept the certificate warning.'); throw 0; }
+  stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' }, audio: true });
+  $('local').srcObject = stream;
+}
+function makePC() {
+  pc = new RTCPeerConnection({ iceServers: [] });
+  stream.getTracks().forEach(t => pc.addTrack(t, stream));
+  pc.ontrack = e => { $('remote').srcObject = e.streams[0]; };
+  pc.onicecandidate = e => e.candidate && sig(other, { candidate: e.candidate });
+  pc.onconnectionstatechange = () => { if (['failed', 'closed'].includes(pc.connectionState)) hangup(false); };
+  $('call').style.display = 'block';
+}
+async function callUser(n) {
+  other = n; await media(); makePC();
+  const o = await pc.createOffer(); await pc.setLocalDescription(o);
+  sig(n, { offer: o });
+}
+async function onSignal({ from, data }) {
+  if (data.offer) {
+    if (pc || pendingOffer) return sig(from, { busy: true });
+    pendingOffer = { from, offer: data.offer };
+    $('inTxt').textContent = '@' + from + ' is calling…'; $('incoming').style.display = 'flex';
+  } else if (data.answer && pc) {
+    await pc.setRemoteDescription(data.answer); flush();
+  } else if (data.candidate) {
+    if (pc && pc.remoteDescription) pc.addIceCandidate(data.candidate).catch(() => {}); else queue.push(data.candidate);
+  } else if (data.hangup) { hangup(false); pendingOffer = null; $('incoming').style.display = 'none'; }
+  else if (data.busy) { alert('User is busy'); hangup(false); }
+}
+function flush() { queue.forEach(c => pc.addIceCandidate(c).catch(() => {})); queue = []; }
+async function accept() {
+  const { from, offer } = pendingOffer; pendingOffer = null; $('incoming').style.display = 'none';
+  other = from; await media(); makePC();
+  await pc.setRemoteDescription(offer); flush();
+  const a = await pc.createAnswer(); await pc.setLocalDescription(a);
+  sig(from, { answer: a });
+}
+function decline() { sig(pendingOffer.from, { hangup: true }); pendingOffer = null; $('incoming').style.display = 'none'; }
+function hangup(notify) {
+  if (notify && other) sig(other, { hangup: true });
+  if (pc) pc.close(); pc = null;
+  if (stream) stream.getTracks().forEach(t => t.stop()); stream = null;
+  $('remote').srcObject = null; $('call').style.display = 'none'; other = null; queue = [];
+}
+function toggle(kind, btn) {
+  const t = (kind === 'audio' ? stream.getAudioTracks() : stream.getVideoTracks())[0];
+  t.enabled = !t.enabled;
+  btn.textContent = kind === 'audio' ? (t.enabled ? 'Mute' : 'Unmute') : (t.enabled ? 'Cam off' : 'Cam on');
+}
+</script>
+</body>
+</html>
